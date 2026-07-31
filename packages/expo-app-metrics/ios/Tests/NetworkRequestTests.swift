@@ -604,6 +604,48 @@ struct NetworkRequestTaskSwizzlingTests {
     #expect(recorded?.statusCode == 200)
   }
 
+  /// Regression test for the FirebaseAuth crash
+  /// (`-[ExpoAppMetrics.DelegateProxy setFetcher:forTask:]: unrecognized selector`). GTMSessionFetcher
+  /// makes itself the session delegate, then detects its own dispatcher with
+  /// `![delegate isKindOfClass:[GTMSessionFetcher class]]`. Mirroring the wrapped delegate's class is
+  /// what makes it take the "the fetcher is the delegate" branch and never send the selector.
+  @Test
+  func `answers isKindOfClass for the wrapped delegate`() {
+    let delegate = FakeSessionDelegate()
+    let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+    defer { session.invalidateAndCancel() }
+
+    let installed = session.delegate as? NSObject
+    // Guard the premise: if the proxy stopped being installed the assertions below would pass for
+    // the wrong reason.
+    #expect(installed !== delegate)
+    #expect(installed?.isKind(of: FakeSessionDelegate.self) == true)
+    #expect(installed?.isMember(of: FakeSessionDelegate.self) == true)
+    #expect(installed?.isKind(of: URLSession.self) == false)
+  }
+
+  /// Second half of the same crash: an unimplemented selector must reach the wrapped delegate rather
+  /// than die on the proxy, so the resulting `unrecognized selector` names the caller's delegate and
+  /// not `ExpoAppMetrics`.
+  @Test
+  func `forwards unimplemented selectors to the wrapped delegate`() {
+    let delegate = FakeSessionDelegate()
+    let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+    defer { session.invalidateAndCancel() }
+
+    let installed = session.delegate as? NSObject
+    #expect(installed !== delegate)
+    // `setFetcher:forTask:` stands in for any selector the wrapped delegate doesn't implement.
+    let unimplemented = NSSelectorFromString("setFetcher:forTask:")
+    #expect(delegate.responds(to: unimplemented) == false)
+    #expect(installed?.forwardingTarget(for: unimplemented) as? NSObject === delegate)
+    // Selectors the wrapped delegate does implement keep forwarding to it as before.
+    #expect(
+      installed?.forwardingTarget(for: NSSelectorFromString("URLSession:didBecomeInvalidWithError:"))
+        as? NSObject === delegate
+    )
+  }
+
   private func waitForRecorded(matching url: URL, attempts: Int = 50) async -> NetworkRequest? {
     for _ in 0..<attempts {
       let found = try? await AppMetricsActor.isolated {
@@ -843,6 +885,12 @@ private final class FilteringDelegate: NetworkRequestObserverDelegate, @unchecke
     }
     completed.append(request)
   }
+}
+
+/// Stands in for a third-party session delegate (GTMSessionFetcher's fetcher). It implements one
+/// callback so the forwarding test can tell a selector it handles apart from one it doesn't.
+private final class FakeSessionDelegate: NSObject, URLSessionDataDelegate {
+  func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {}
 }
 
 /// A trivial `URLProtocol` that pretends to be a server. Routes by URL path:

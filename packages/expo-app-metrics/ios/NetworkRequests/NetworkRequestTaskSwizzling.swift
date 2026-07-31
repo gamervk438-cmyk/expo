@@ -575,14 +575,35 @@ private final class DelegateProxy: NSObject {
     return wrapped?.responds(to: aSelector) ?? false
   }
 
+  /// Class checks answer for the wrapped delegate: libraries branch on the class of
+  /// `session.delegate`, and a proxy that answers for itself sends them down the wrong branch.
+  ///
+  /// GTMSessionFetcher (FirebaseAuth's HTTP layer) forced this. It makes the fetcher its own delegate,
+  /// then detects its internal dispatcher with `![delegate isKindOfClass:[GTMSessionFetcher class]]`.
+  /// Answering for the proxy made it send us `setFetcher:forTask:`, a dispatcher-only selector, which
+  /// crashed the app on the first token refresh.
+  override func isKind(of aClass: AnyClass) -> Bool {
+    if let wrapped = wrapped as? NSObject, wrapped.isKind(of: aClass) {
+      return true
+    }
+    return super.isKind(of: aClass)
+  }
+
+  override func isMember(of aClass: AnyClass) -> Bool {
+    if let wrapped = wrapped as? NSObject, wrapped.isMember(of: aClass) {
+      return true
+    }
+    return super.isMember(of: aClass)
+  }
+
+  /// Everything except the metrics callback goes to the wrapped delegate, including selectors it
+  /// doesn't implement: returning `nil` for those would raise `unrecognized selector` on the proxy,
+  /// naming `ExpoAppMetrics` in a crash that belongs to the caller's own delegate.
   override func forwardingTarget(for aSelector: Selector!) -> Any? {
     if aSelector == Self.metricsSelector {
       return nil
     }
-    if let wrapped, wrapped.responds(to: aSelector) {
-      return wrapped
-    }
-    return nil
+    return wrapped
   }
 
   /// Canonical recording site. `didFinishCollectingMetrics:` is Apple's "task is fully done" signal
